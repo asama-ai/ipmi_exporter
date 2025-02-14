@@ -14,10 +14,12 @@
 package main
 
 import (
+	"context"
 	"path"
+	"strings"
 	"time"
 
-	"github.com/go-kit/log/level"
+	"github.com/bougou/go-ipmi"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/prometheus-community/ipmi_exporter/freeipmi"
@@ -63,7 +65,7 @@ var (
 )
 
 // Describe implements Prometheus.Collector.
-func (c metaCollector) Describe(ch chan<- *prometheus.Desc) {
+func (c metaCollector) Describe(_ chan<- *prometheus.Desc) {
 	// all metrics are described ad-hoc
 }
 
@@ -81,7 +83,7 @@ func (c metaCollector) Collect(ch chan<- prometheus.Metric) {
 	start := time.Now()
 	defer func() {
 		duration := time.Since(start).Seconds()
-		level.Debug(logger).Log("msg", "Scrape duration", "target", targetName(c.target), "duration", duration)
+		logger.Debug("Scrape duration", "target", targetName(c.target), "duration", duration)
 		ch <- prometheus.MustNewConstMetric(
 			durationDesc,
 			prometheus.GaugeValue,
@@ -97,18 +99,26 @@ func (c metaCollector) Collect(ch chan<- prometheus.Metric) {
 
 	for _, collector := range config.GetCollectors() {
 		var up int
-		level.Debug(logger).Log("msg", "Running collector", "target", target.host, "collector", collector.Name())
+		logger.Debug("Running collector", "target", target.host, "collector", collector.Name())
 
 		fqcmd := collector.Cmd()
-		if !path.IsAbs(fqcmd) {
-			fqcmd = path.Join(*executablesPath, collector.Cmd())
+		result := freeipmi.Result{}
+
+		// Go-native collectors return empty string as command
+		if fqcmd != "" {
+			if !path.IsAbs(fqcmd) {
+				fqcmd = path.Join(*executablesPath, collector.Cmd())
+			}
+			args := collector.Args()
+			cfg := config.GetFreeipmiConfig()
+
+			result = freeipmi.Execute(fqcmd, args, cfg, target.host, logger)
 		}
-		args := collector.Args()
-		cfg := config.GetFreeipmiConfig()
 
-		result := freeipmi.Execute(fqcmd, args, cfg, target.host, logger)
-
-		up, _ = collector.Collect(result, ch, target)
+		up, err := collector.Collect(result, ch, target)
+		if err != nil {
+			logger.Error("Collector failed", "name", collector.Name(), "error", err)
+		}
 		markCollectorUp(ch, string(collector.Name()), up)
 	}
 }
@@ -118,4 +128,45 @@ func targetName(target string) string {
 		return "[local]"
 	}
 	return target
+}
+
+func NewNativeClient(target ipmiTarget) (*ipmi.Client, error) {
+	var client *ipmi.Client
+	var err error
+
+	if target.host == targetLocal {
+		client, err = ipmi.NewOpenClient()
+	} else {
+		client, err = ipmi.NewClient(target.host, 623, target.config.User, target.config.Password)
+	}
+	if err != nil {
+		logger.Error("Error creating IPMI client", "target", target.host, "error", err)
+		return nil, err
+	}
+	if target.host != targetLocal {
+		// TODO it's probably safe to ditch other interfaces?
+		client = client.WithInterface(ipmi.InterfaceLanplus)
+	}
+	if target.config.Timeout != 0 {
+		client = client.WithTimeout(time.Duration(target.config.Timeout * uint32(time.Millisecond)))
+	}
+	if target.config.Privilege != "" {
+		// TODO this means different default (unspecified) for native vs. FreeIPMI (operator)
+		priv := ipmi.PrivilegeLevelUnspecified
+		switch strings.ToLower(target.config.Privilege) {
+		case "admin":
+			priv = ipmi.PrivilegeLevelAdministrator
+		case "operator":
+			priv = ipmi.PrivilegeLevelOperator
+		case "user":
+			priv = ipmi.PrivilegeLevelUser
+		}
+		client = client.WithMaxPrivilegeLevel(priv)
+	}
+	// TODO workaround-flags not used in native client
+	if err := client.Connect(context.TODO()); err != nil {
+		logger.Error("Error connecting to IPMI device", "target", target.host, "error", err)
+		return nil, err
+	}
+	return client, nil
 }

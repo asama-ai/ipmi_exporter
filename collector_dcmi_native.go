@@ -1,4 +1,4 @@
-// Copyright 2021 The Prometheus Authors
+// Copyright 2025 The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,17 +14,15 @@
 package main
 
 import (
+	"context"
+
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/prometheus-community/ipmi_exporter/freeipmi"
 )
 
-const (
-	DCMICollectorName CollectorName = "dcmi"
-)
-
 var (
-	powerConsumptionDesc = prometheus.NewDesc(
+	powerConsumptionNativeDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "dcmi", "power_consumption_watts"),
 		"Current power consumption in Watts.",
 		[]string{},
@@ -32,32 +30,37 @@ var (
 	)
 )
 
-type DCMICollector struct{}
+type DCMINativeCollector struct{}
 
-func (c DCMICollector) Name() CollectorName {
+func (c DCMINativeCollector) Name() CollectorName {
+	// The name is intentionally the same as the non-native collector
 	return DCMICollectorName
 }
 
-func (c DCMICollector) Cmd() string {
-	return "ipmi-dcmi"
+func (c DCMINativeCollector) Cmd() string {
+	return ""
 }
 
-func (c DCMICollector) Args() []string {
-	return []string{"--get-system-power-statistics"}
+func (c DCMINativeCollector) Args() []string {
+	return []string{}
 }
 
-func (c DCMICollector) Collect(result freeipmi.Result, ch chan<- prometheus.Metric, target ipmiTarget) (int, error) {
-	currentPowerConsumption, err := freeipmi.GetCurrentPowerConsumption(result)
+func (c DCMINativeCollector) Collect(_ freeipmi.Result, ch chan<- prometheus.Metric, target ipmiTarget) (int, error) {
+	client, err := NewNativeClient(target)
+	if err != nil {
+		return 0, err
+	}
+	res, err := client.GetDCMIPowerReading(context.TODO())
 	if err != nil {
 		logger.Error("Failed to collect DCMI data", "target", targetName(target.host), "error", err)
 		return 0, err
 	}
-	// Returned value negative == Power Measurement is not avail
-	if currentPowerConsumption > -1 {
+
+	if res.PowerMeasurementActive {
 		ch <- prometheus.MustNewConstMetric(
-			powerConsumptionDesc,
+			powerConsumptionNativeDesc,
 			prometheus.GaugeValue,
-			currentPowerConsumption,
+			float64(res.CurrentPower),
 		)
 	}
 	return 1, nil

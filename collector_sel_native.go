@@ -1,4 +1,4 @@
-// Copyright 2021 The Prometheus Authors
+// Copyright 2025 The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,24 +14,22 @@
 package main
 
 import (
+	"context"
+
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/prometheus-community/ipmi_exporter/freeipmi"
 )
 
-const (
-	SELCollectorName CollectorName = "sel"
-)
-
 var (
-	selEntriesCountDesc = prometheus.NewDesc(
+	selEntriesCountNativeDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "sel", "logs_count"),
 		"Current number of log entries in the SEL.",
 		[]string{},
 		nil,
 	)
 
-	selFreeSpaceDesc = prometheus.NewDesc(
+	selFreeSpaceNativeDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "sel", "free_space_bytes"),
 		"Current free space remaining for new SEL entries.",
 		[]string{},
@@ -39,40 +37,40 @@ var (
 	)
 )
 
-type SELCollector struct{}
+type SELNativeCollector struct{}
 
-func (c SELCollector) Name() CollectorName {
+func (c SELNativeCollector) Name() CollectorName {
+	// The name is intentionally the same as the non-native collector
 	return SELCollectorName
 }
 
-func (c SELCollector) Cmd() string {
-	return "ipmi-sel"
+func (c SELNativeCollector) Cmd() string {
+	return ""
 }
 
-func (c SELCollector) Args() []string {
-	return []string{"--info"}
+func (c SELNativeCollector) Args() []string {
+	return []string{""}
 }
 
-func (c SELCollector) Collect(result freeipmi.Result, ch chan<- prometheus.Metric, target ipmiTarget) (int, error) {
-	entriesCount, err := freeipmi.GetSELInfoEntriesCount(result)
+func (c SELNativeCollector) Collect(_ freeipmi.Result, ch chan<- prometheus.Metric, target ipmiTarget) (int, error) {
+	client, err := NewNativeClient(target)
 	if err != nil {
-		logger.Error("Failed to collect SEL data", "target", targetName(target.host), "error", err)
 		return 0, err
 	}
-	freeSpace, err := freeipmi.GetSELInfoFreeSpace(result)
+	res, err := client.GetSELInfo(context.TODO())
 	if err != nil {
-		logger.Error("Failed to collect SEL data", "target", targetName(target.host), "error", err)
 		return 0, err
 	}
+
 	ch <- prometheus.MustNewConstMetric(
-		selEntriesCountDesc,
+		selEntriesCountNativeDesc,
 		prometheus.GaugeValue,
-		entriesCount,
+		float64(res.Entries),
 	)
 	ch <- prometheus.MustNewConstMetric(
-		selFreeSpaceDesc,
+		selFreeSpaceNativeDesc,
 		prometheus.GaugeValue,
-		freeSpace,
+		float64(res.FreeBytes),
 	)
 	return 1, nil
 }

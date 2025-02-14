@@ -15,18 +15,18 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
 	kingpin "github.com/alecthomas/kingpin/v2"
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
+	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/common/promlog"
-	"github.com/prometheus/common/promlog/flag"
+	"github.com/prometheus/common/promslog"
+	"github.com/prometheus/common/promslog/flag"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/exporter-toolkit/web"
 	webflag "github.com/prometheus/exporter-toolkit/web/kingpinflag"
@@ -41,6 +41,10 @@ var (
 		"freeipmi.path",
 		"Path to FreeIPMI executables (default: rely on $PATH).",
 	).String()
+	nativeIPMI = kingpin.Flag(
+		"native-ipmi",
+		"Use native IPMI implementation instead of FreeIPMI (EXPERIMENTAL)",
+	).Bool()
 	webConfig = webflag.AddFlags(kingpin.CommandLine, ":9290")
 
 	sc = &SafeConfig{
@@ -48,7 +52,7 @@ var (
 	}
 	reloadCh chan chan error
 
-	logger log.Logger
+	logger *slog.Logger
 )
 
 func remoteIPMIHandler(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +72,7 @@ func remoteIPMIHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	level.Debug(logger).Log("msg", "Scraping target", "target", target, "module", module)
+	logger.Debug("Scraping target", "target", target, "module", module)
 
 	registry := prometheus.NewRegistry()
 	remoteCollector := metaCollector{target: target, module: module, config: sc}
@@ -86,25 +90,29 @@ func updateConfiguration(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("failed to reload config: %s", err), http.StatusInternalServerError)
 		}
 	default:
-		level.Error(logger).Log("msg", "Only POST requests allowed", "url", r.URL)
+		logger.Error("Only POST requests allowed", "url", r.URL)
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "Only POST requests allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func main() {
-	promlogConfig := &promlog.Config{}
-	flag.AddFlags(kingpin.CommandLine, promlogConfig)
+	promslogConfig := &promslog.Config{}
+	flag.AddFlags(kingpin.CommandLine, promslogConfig)
 	kingpin.CommandLine.UsageWriter(os.Stdout)
 	kingpin.HelpFlag.Short('h')
 	kingpin.Version(version.Print("ipmi_exporter"))
 	kingpin.Parse()
-	logger = promlog.New(promlogConfig)
-	level.Info(logger).Log("msg", "Starting ipmi_exporter", "version", version.Info())
+	logger = promslog.New(promslogConfig)
+	logger.Info("Starting ipmi_exporter", "version", version.Info())
+	if *nativeIPMI {
+		logger.Info("Using Go-native IPMI implementation - this is currently EXPERIMENTAL")
+		logger.Info("Make sure to read https://github.com/prometheus-community/ipmi_exporter/blob/master/docs/native.md")
+	}
 
 	// Bail early if the config is bad.
 	if err := sc.ReloadConfig(*configFile); err != nil {
-		level.Error(logger).Log("msg", "Error parsing config file", "error", err)
+		logger.Error("Error parsing config file", "error", err)
 		os.Exit(1)
 	}
 
@@ -116,11 +124,11 @@ func main() {
 			select {
 			case <-hup:
 				if err := sc.ReloadConfig(*configFile); err != nil {
-					level.Error(logger).Log("msg", "Error reloading config", "error", err)
+					logger.Error("Error reloading config", "error", err)
 				}
 			case rc := <-reloadCh:
 				if err := sc.ReloadConfig(*configFile); err != nil {
-					level.Error(logger).Log("msg", "Error reloading config", "error", err)
+					logger.Error("Error reloading config", "error", err)
 					rc <- err
 				} else {
 					rc <- nil
@@ -129,6 +137,7 @@ func main() {
 		}
 	}()
 
+	prometheus.MustRegister(versioncollector.NewCollector("ipmi_exporter"))
 	localCollector := metaCollector{target: targetLocal, module: "default", config: sc}
 	prometheus.MustRegister(&localCollector)
 
@@ -136,7 +145,7 @@ func main() {
 	http.HandleFunc("/ipmi", remoteIPMIHandler)       // Endpoint to do IPMI scrapes.
 	http.HandleFunc("/-/reload", updateConfiguration) // Endpoint to reload configuration.
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html>
             <head>
             <title>IPMI Exporter</title>
@@ -167,7 +176,7 @@ func main() {
 
 	srv := &http.Server{}
 	if err := web.ListenAndServe(srv, webConfig, logger); err != nil {
-		level.Error(logger).Log("msg", "HTTP listener stopped", "error", err)
+		logger.Error("HTTP listener stopped", "error", err)
 		os.Exit(1)
 	}
 }
